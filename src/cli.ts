@@ -1,28 +1,42 @@
-// CLI plumbing: the destructive guard + error → exit-code handling.
-// Runs only in GitLab CI (non-interactive): no color, no prompt, no JSON mode.
-// Command results go to stdout via console.log; status lines go to stderr.
+import { Command } from "commander";
+import { AwsClients } from "./aws-clients.js";
+import { ConfigStore } from "./config-store.js";
+import { EcsTaskRunner } from "./ecs-task-runner.js";
+import { AirflowCommands } from "./commands/airflow-commands.js";
+import { AlbCommands } from "./commands/alb-commands.js";
+import { BgCommands } from "./commands/bg-commands.js";
+import { Log } from "./log.js";
 
-/** Status/diagnostics → stderr (keeps stdout clean for results). */
-export const say = (msg: string): void => void process.stderr.write(msg + "\n");
+/**
+ * The application. Builds the command-line program, wires the services into the
+ * command groups (constructor injection), and runs it.
+ */
+export class Cli {
+  private readonly program = new Command();
 
-/** An expected failure with a clean message (no stack trace). */
-export class OpsError extends Error {}
+  constructor() {
+    const aws = new AwsClients();
+    const config = new ConfigStore(aws.ssm);
+    const runner = new EcsTaskRunner(aws.ecs);
 
-export function fail(msg: string): never {
-  throw new OpsError(msg);
-}
+    this.program
+      .name("airflow-ops")
+      .description("Ops CLI for the Airflow ECS/Fargate + RDS deployment.")
+      .version("0.1.0")
+      .option("--stack <name>", "runtime stack name, e.g. airflow-3_2_1")
+      .option("-y, --yes", "confirm destructive ops (required in CI)", false);
 
-/** Destructive ops need explicit --yes — the whole CI authorization. */
-export function requireYes(yes: boolean, what: string): void {
-  if (!yes) fail(`Refusing destructive op without --yes: ${what}`);
-}
+    new AirflowCommands(config, runner).register(this.program);
+    new AlbCommands(config, aws.elbv2).register(this.program);
+    new BgCommands(config, aws.rds, aws.secrets).register(this.program);
+  }
 
-/** Run the CLI; map any error to a clean stderr message + exit 1. */
-export async function run(main: () => Promise<unknown>): Promise<void> {
-  try {
-    await main();
-  } catch (e) {
-    say(`✗ ${e instanceof OpsError ? e.message : ((e as Error).stack ?? String(e))}`);
-    process.exitCode = 1;
+  async run(argv: string[]): Promise<void> {
+    try {
+      await this.program.parseAsync(argv);
+    } catch (e) {
+      Log.status(`✗ ${e instanceof Error ? e.message : String(e)}`);
+      process.exitCode = 1;
+    }
   }
 }

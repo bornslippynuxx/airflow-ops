@@ -36,16 +36,16 @@ container command overridden — inheriting its DB connection config.
 ## Configure
 
 Each stack publishes its config as a single JSON SSM parameter — persist at
-`/airflow/persist`, each runtime stack at `/airflow/<stack>`. Confirm these in one
-file, [`src/aws.ts`](./src/aws.ts), against your deployment:
+`/airflow/persist`, each runtime stack at `/airflow/<stack>`. Confirm these against
+your deployment:
 
-- `SSM_PARAM` — the parameter paths.
-- `PersistConfig` / `RuntimeConfig` — the interfaces each param's JSON is parsed
-  into (field name = JSON key). Check the real keys with:
+- Parameter paths + the `PersistConfig` / `RuntimeConfig` interfaces (field name =
+  JSON key) live in [`src/config-store.ts`](./src/config-store.ts). Check the real keys with:
   ```
   aws ssm get-parameter --name /airflow/persist --query Parameter.Value --output text | jq keys
   ```
-- `AIRFLOW_CONTAINER` — the container name in the task def that runs the airflow CLI.
+- The container name that runs the airflow CLI is `AirflowCommands.CONTAINER` in
+  [`src/commands/airflow-commands.ts`](./src/commands/airflow-commands.ts).
 
 ## Usage
 
@@ -60,8 +60,8 @@ yarn ops airflow migrate --stack airflow-3_2_1
 ## Build (for CI)
 
 ```bash
-yarn build          # → dist/ops.cjs (single self-contained file)
-node dist/ops.cjs airflow migrate --stack airflow-3_2_1 --yes
+yarn build          # tsc → dist/ (compiled JS)
+node dist/index.js airflow migrate --stack airflow-3_2_1 --yes
 ```
 
 ## Global flags
@@ -74,9 +74,9 @@ node dist/ops.cjs airflow migrate --stack airflow-3_2_1 --yes
 yarn typecheck
 ```
 
-Source layout: `src/aws.ts` (clients, SSM-param resolution, one-off task runner),
-`src/cli.ts` (`--yes` guard, error→exit-code), `src/commands/*` (thin handlers),
-`src/index.ts` (wiring).
+Object-oriented, one class per file: `Cli` (wiring), `AwsClients`, `ConfigStore`
+(SSM → typed config), `EcsTaskRunner`, `Log`, and `commands/*Commands`
+(one class per group). Entry point: `src/index.ts` → `new Cli().run(process.argv)`.
 
 ## License
 
