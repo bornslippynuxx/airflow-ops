@@ -93,11 +93,6 @@ async function runCli(aws: AwsClients, opts: GlobalOpts, argv: string[], wait: b
   const pretty = `airflow ${argv.join(" ")}`;
   say(`→ ${pretty}  (${stack})`);
 
-  if (opts.dryRun) {
-    say(`✓ [dry-run] would run: ${pretty}`);
-    return;
-  }
-
   const res = await runManualEcsTask(aws.ecs, {
     cluster: rc.clusterArn,
     taskDefinition: rc.taskDefinitionArn,

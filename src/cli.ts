@@ -1,16 +1,9 @@
-// CLI plumbing: output, the destructive guard, and error → exit-code handling.
-// This tool only runs in GitLab pipelines, so there's no color/verbose/prompt.
+// CLI plumbing: the destructive guard + error → exit-code handling.
+// Runs only in GitLab CI (non-interactive): no color, no prompt, no JSON mode.
+// Command results go to stdout via console.log; status lines go to stderr.
 
-let jsonMode = false;
-export const setJson = (v: boolean): void => void (jsonMode = v);
-
-/** Diagnostics/status → stderr, so `--json` stdout stays clean. */
+/** Status/diagnostics → stderr (keeps stdout clean for results). */
 export const say = (msg: string): void => void process.stderr.write(msg + "\n");
-
-/** A command's primary output → stdout: JSON in `--json` mode, else a human string. */
-export function out<T>(data: T, human: (d: T) => string): void {
-  process.stdout.write((jsonMode ? JSON.stringify(data, null, 2) : human(data)) + "\n");
-}
 
 /** An expected failure with a clean message (no stack trace). */
 export class OpsError extends Error {}
@@ -19,7 +12,7 @@ export function fail(msg: string): never {
   throw new OpsError(msg);
 }
 
-/** Destructive ops need explicit `--yes` — that's the whole CI authorization. */
+/** Destructive ops need explicit --yes — the whole CI authorization. */
 export function requireYes(yes: boolean, what: string): void {
   if (!yes) fail(`Refusing destructive op without --yes: ${what}`);
 }

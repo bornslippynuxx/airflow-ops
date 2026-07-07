@@ -1,7 +1,6 @@
 import { Command } from "commander";
 import { DescribeRulesCommand, type Rule } from "@aws-sdk/client-elastic-load-balancing-v2";
 import { session, persistConfig } from "../aws.js";
-import { out } from "../cli.js";
 
 /** `airflow-ops alb ...` — ELBv2 listener-rule operations (listener lives on persist). */
 export function registerAlb(program: Command): void {
@@ -9,30 +8,24 @@ export function registerAlb(program: Command): void {
 
   alb
     .command("describe-rules")
-    .description("List the listener rules on the persist-stack ALB (read-only)")
+    .description("List the listener rules on the persist-stack ALB")
     .action(async function (this: Command) {
       const { aws } = session(this);
       const persist = await persistConfig(aws.ssm);
       const { Rules = [] } = await aws.elbv2.send(new DescribeRulesCommand({ ListenerArn: persist.httpsListenerArn }));
 
-      out(Rules.map(summarizeRule), (rules) =>
-        rules
-          .map((r) => `  ${String(r.priority).padStart(7)}  ${r.action}  ${r.conditions || "(default)"}`)
-          .join("\n") || "  (no rules)",
-      );
+      const rows = Rules.map((r) => `  ${(r.Priority ?? "default").padStart(7)}  ${action(r)}  ${host(r)}`);
+      console.log(rows.join("\n") || "  (no rules)");
     });
 }
 
-function summarizeRule(r: Rule) {
-  const conditions = (r.Conditions ?? [])
-    .map((c) =>
-      c.Field === "host-header"
-        ? `host=${(c.HostHeaderConfig?.Values ?? c.Values ?? []).join("|")}`
-        : `${c.Field}=${(c.Values ?? []).join("|")}`,
-    )
-    .join(", ");
-  const action = (r.Actions ?? [])
+const host = (r: Rule): string => {
+  const c = r.Conditions?.find((x) => x.Field === "host-header");
+  const v = c?.HostHeaderConfig?.Values ?? c?.Values ?? [];
+  return v.length ? `host=${v.join("|")}` : "(default)";
+};
+
+const action = (r: Rule): string =>
+  (r.Actions ?? [])
     .map((a) => (a.Type === "forward" ? `forward→${a.TargetGroupArn?.match(/targetgroup\/([^/]+)/)?.[1] ?? "?"}` : a.Type))
-    .join(",");
-  return { priority: r.Priority ?? "default", conditions, action: action || "(none)" };
-}
+    .join(",") || "(none)";

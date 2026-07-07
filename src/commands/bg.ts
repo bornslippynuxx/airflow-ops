@@ -7,7 +7,7 @@ import {
 } from "@aws-sdk/client-rds";
 import { GetSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { session, persistConfig } from "../aws.js";
-import { out, say, fail } from "../cli.js";
+import { say, fail } from "../cli.js";
 
 /** `airflow-ops bg ...` — RDS Blue/Green Deployment operations on the persist DB. */
 export function registerBg(program: Command): void {
@@ -20,10 +20,8 @@ export function registerBg(program: Command): void {
       const { aws } = session(this);
       const persist = await persistConfig(aws.ssm);
       const deployments = await findDeployments(aws.rds, persist.dbInstanceIdentifier);
-      out(deployments.map(summarize), (ds) =>
-        ds.map((x) => `  ${x.name}  status=${x.status}  ${x.source} → ${x.target}`).join("\n") ||
-        "  (no active blue/green deployment)",
-      );
+      const rows = deployments.map((d) => `  ${d.BlueGreenDeploymentName}  status=${d.Status}  ${d.Source} → ${d.Target}`);
+      console.log(rows.join("\n") || "  (no active blue/green deployment)");
     });
 
   bg
@@ -48,7 +46,7 @@ export function registerBg(program: Command): void {
       const conn = `postgresql://${creds.username ?? "postgres"}:${pw}@${endpoint}:${green?.Endpoint?.Port ?? 5432}/${green?.DBName ?? "airflow"}`;
 
       if (!withPassword) say("! password omitted (--no-password); for display only");
-      out({ endpoint, connectionString: conn }, (d) => d.connectionString);
+      console.log(conn);
     });
 }
 
@@ -57,10 +55,6 @@ async function findDeployments(rds: RDSClient, dbInstanceId: string): Promise<Bl
   const all = (await rds.send(new DescribeBlueGreenDeploymentsCommand({}))).BlueGreenDeployments ?? [];
   const mine = all.filter((d) => (d.Source ?? "").includes(dbInstanceId));
   return mine.length ? mine : all;
-}
-
-function summarize(d: BlueGreenDeployment) {
-  return { name: d.BlueGreenDeploymentName, status: d.Status, source: d.Source, target: d.Target };
 }
 
 async function getDbCreds(
