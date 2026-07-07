@@ -1,4 +1,3 @@
-import type { Command } from "commander";
 import {
   DescribeTasksCommand,
   ECSClient,
@@ -11,9 +10,15 @@ import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { fail, say } from "./cli.js";
 
-// Region + credentials come from the ambient AWS environment (AWS_REGION + the
-// role the GitLab job assumes) — the CLI stays env-agnostic.
+// AWS clients — created once. Region + credentials come from the ambient AWS
+// environment (AWS_REGION + the role the GitLab job assumes).
+export const ssm = new SSMClient({});
+export const ecs = new ECSClient({});
+export const elbv2 = new ElasticLoadBalancingV2Client({});
+export const rds = new RDSClient({});
+export const secrets = new SecretsManagerClient({});
 
+// ── options ───────────────────────────────────────────────────────────────────
 export interface GlobalOpts {
   stack?: string; // runtime stack, e.g. airflow-3_2_1
   yes: boolean;
@@ -23,29 +28,6 @@ export interface GlobalOpts {
 export function runtimeStackName(opts: GlobalOpts): string {
   if (!opts.stack) fail("This command needs a runtime stack: pass --stack airflow-3_2_1.");
   return opts.stack;
-}
-
-// ── clients + session ─────────────────────────────────────────────────────────
-export interface AwsClients {
-  ssm: SSMClient;
-  ecs: ECSClient;
-  elbv2: ElasticLoadBalancingV2Client;
-  rds: RDSClient;
-  secrets: SecretsManagerClient;
-}
-
-export function makeClients(): AwsClients {
-  return {
-    ssm: new SSMClient({}),
-    ecs: new ECSClient({}),
-    elbv2: new ElasticLoadBalancingV2Client({}),
-    rds: new RDSClient({}),
-    secrets: new SecretsManagerClient({}),
-  };
-}
-
-export function session(cmd: Command): { opts: GlobalOpts; aws: AwsClients } {
-  return { opts: cmd.optsWithGlobals() as GlobalOpts, aws: makeClients() };
 }
 
 // ── config from SSM ───────────────────────────────────────────────────────────
@@ -75,7 +57,7 @@ export interface RuntimeConfig {
 }
 
 /** Read a JSON SSM parameter and parse it into `T`. */
-async function readConfig<T>(ssm: SSMClient, name: string): Promise<T> {
+export async function readConfig<T>(name: string): Promise<T> {
   let value: string | undefined;
   try {
     value = (await ssm.send(new GetParameterCommand({ Name: name, WithDecryption: true }))).Parameter?.Value;
@@ -90,12 +72,6 @@ async function readConfig<T>(ssm: SSMClient, name: string): Promise<T> {
   }
 }
 
-export const persistConfig = (ssm: SSMClient): Promise<PersistConfig> =>
-  readConfig<PersistConfig>(ssm, SSM_PARAM.persist);
-
-export const runtimeConfig = (ssm: SSMClient, stackName: string): Promise<RuntimeConfig> =>
-  readConfig<RuntimeConfig>(ssm, SSM_PARAM.runtime(stackName));
-
 // ── one-off ECS task (how we run the airflow CLI) ─────────────────────────────
 export interface ManualEcsTaskParams {
   cluster: string;
@@ -109,7 +85,6 @@ export interface ManualEcsTaskParams {
 /** Run a one-off Fargate task with the container command overridden. By default
  *  waits for it to stop and fails on a non-zero exit, so CI fails when the CLI does. */
 export async function runManualEcsTask(
-  ecs: ECSClient,
   p: ManualEcsTaskParams,
   opts: { wait: boolean } = { wait: true },
 ): Promise<{ taskArn: string; exitCode: number | null }> {

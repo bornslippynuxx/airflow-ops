@@ -1,19 +1,19 @@
 import { Command } from "commander";
 import {
-  session,
   runtimeStackName,
-  runtimeConfig,
+  readConfig,
+  SSM_PARAM,
   runManualEcsTask,
   AIRFLOW_CONTAINER,
-  type AwsClients,
+  type RuntimeConfig,
   type GlobalOpts,
 } from "../aws.js";
 import { requireYes, say } from "../cli.js";
 
 /**
  * `airflow-ops airflow ...` — Airflow *application* operations. Each runs the
- * airflow CLI as a one-off Fargate task against a runtime stack (--stack / --to),
- * waits for it, and fails if the CLI exits non-zero. No REST API / auth needed.
+ * airflow CLI as a one-off Fargate task against a runtime stack (--stack), waits
+ * for it, and fails if the CLI exits non-zero. No REST API / auth needed.
  */
 export function registerAirflow(program: Command): void {
   const airflow = program
@@ -25,8 +25,8 @@ export function registerAirflow(program: Command): void {
     .description("Run `airflow db migrate` on a runtime stack")
     .option("--no-wait", "start the task but don't wait for it to finish")
     .action(async function (this: Command) {
-      const { opts, aws } = session(this);
-      await runCli(aws, opts, ["db", "migrate"], (this.opts() as { wait: boolean }).wait);
+      const opts = this.optsWithGlobals() as GlobalOpts;
+      await runCli(opts, ["db", "migrate"], (this.opts() as { wait: boolean }).wait);
     });
 
   airflow
@@ -36,12 +36,12 @@ export function registerAirflow(program: Command): void {
     .option("--skip-archive", "drop archived rows instead of keeping archive tables", false)
     .option("--no-wait", "start the task but don't wait for it to finish")
     .action(async function (this: Command) {
-      const { opts, aws } = session(this);
+      const opts = this.optsWithGlobals() as GlobalOpts;
       const o = this.opts() as { before: string; skipArchive: boolean; wait: boolean };
       requireYes(opts.yes, `Permanently purge Airflow metadata before ${o.before} on ${runtimeStackName(opts)}`);
       const args = ["db", "clean", "--clean-before-timestamp", o.before, "--yes"];
       if (o.skipArchive) args.push("--skip-archive");
-      await runCli(aws, opts, args, o.wait);
+      await runCli(opts, args, o.wait);
     });
 
   airflow
@@ -52,9 +52,9 @@ export function registerAirflow(program: Command): void {
     .option("--description <text>", "pool description", "")
     .option("--no-wait", "start the task but don't wait for it to finish")
     .action(async function (this: Command) {
-      const { opts, aws } = session(this);
+      const opts = this.optsWithGlobals() as GlobalOpts;
       const o = this.opts() as { name: string; slots: number; description: string; wait: boolean };
-      await runCli(aws, opts, ["pools", "set", o.name, String(o.slots), o.description], o.wait);
+      await runCli(opts, ["pools", "set", o.name, String(o.slots), o.description], o.wait);
     });
 
   airflow
@@ -65,12 +65,11 @@ export function registerAirflow(program: Command): void {
     .option("--email <email>", "email address")
     .option("--no-wait", "start the task but don't wait for it to finish")
     .action(async function (this: Command) {
-      const { opts, aws } = session(this);
+      const opts = this.optsWithGlobals() as GlobalOpts;
       const o = this.opts() as { username: string; role: string; email?: string; wait: boolean };
       // TODO: confirm the exact `airflow users create` flags for your Airflow 3 auth
       // manager; prefer sourcing the password from Secrets Manager over a flag.
       await runCli(
-        aws,
         opts,
         [
           "users", "create",
@@ -87,13 +86,13 @@ export function registerAirflow(program: Command): void {
 }
 
 /** Resolve the runtime config and run `airflow <argv>` as a one-off task. */
-async function runCli(aws: AwsClients, opts: GlobalOpts, argv: string[], wait: boolean): Promise<void> {
+async function runCli(opts: GlobalOpts, argv: string[], wait: boolean): Promise<void> {
   const stack = runtimeStackName(opts);
-  const rc = await runtimeConfig(aws.ssm, stack);
+  const rc = await readConfig<RuntimeConfig>(SSM_PARAM.runtime(stack));
   const pretty = `airflow ${argv.join(" ")}`;
   say(`→ ${pretty}  (${stack})`);
 
-  const res = await runManualEcsTask(aws.ecs, {
+  const res = await runManualEcsTask({
     cluster: rc.clusterArn,
     taskDefinition: rc.taskDefinitionArn,
     container: AIRFLOW_CONTAINER,

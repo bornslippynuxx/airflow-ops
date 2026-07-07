@@ -3,10 +3,9 @@ import {
   DescribeBlueGreenDeploymentsCommand,
   DescribeDBInstancesCommand,
   type BlueGreenDeployment,
-  type RDSClient,
 } from "@aws-sdk/client-rds";
-import { GetSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
-import { session, persistConfig } from "../aws.js";
+import { GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
+import { rds, secrets, readConfig, SSM_PARAM, type PersistConfig } from "../aws.js";
 import { say, fail } from "../cli.js";
 
 /** `airflow-ops bg ...` — RDS Blue/Green Deployment operations on the persist DB. */
@@ -16,10 +15,9 @@ export function registerBg(program: Command): void {
   bg
     .command("describe")
     .description("Describe the RDS blue/green deployment(s) for the persist DB (read-only)")
-    .action(async function (this: Command) {
-      const { aws } = session(this);
-      const persist = await persistConfig(aws.ssm);
-      const deployments = await findDeployments(aws.rds, persist.dbInstanceIdentifier);
+    .action(async () => {
+      const persist = await readConfig<PersistConfig>(SSM_PARAM.persist);
+      const deployments = await findDeployments(persist.dbInstanceIdentifier);
       const rows = deployments.map((d) => `  ${d.BlueGreenDeploymentName}  status=${d.Status}  ${d.Source} → ${d.Target}`);
       console.log(rows.join("\n") || "  (no active blue/green deployment)");
     });
@@ -29,19 +27,17 @@ export function registerBg(program: Command): void {
     .description("Print the green (target) DB connection string for the active blue/green deployment (read-only)")
     .option("--no-password", "omit the password from the printed connection string")
     .action(async function (this: Command) {
-      const { aws } = session(this);
       const withPassword = (this.opts() as { password: boolean }).password;
 
-      const persist = await persistConfig(aws.ssm);
-      const dep = (await findDeployments(aws.rds, persist.dbInstanceIdentifier))[0];
+      const persist = await readConfig<PersistConfig>(SSM_PARAM.persist);
+      const dep = (await findDeployments(persist.dbInstanceIdentifier))[0];
       if (!dep?.Target) fail("No active RDS blue/green deployment (or no green target yet).");
 
-      const green = (await aws.rds.send(new DescribeDBInstancesCommand({ DBInstanceIdentifier: dep.Target })))
-        .DBInstances?.[0];
+      const green = (await rds.send(new DescribeDBInstancesCommand({ DBInstanceIdentifier: dep.Target }))).DBInstances?.[0];
       const endpoint = green?.Endpoint?.Address;
       if (!endpoint) fail("Green DB endpoint not available yet (still provisioning?).");
 
-      const creds = await getDbCreds(aws.secrets, persist.dbSecretArn);
+      const creds = await getDbCreds(persist.dbSecretArn);
       const pw = withPassword ? (creds.password ?? "") : "***";
       const conn = `postgresql://${creds.username ?? "postgres"}:${pw}@${endpoint}:${green?.Endpoint?.Port ?? 5432}/${green?.DBName ?? "airflow"}`;
 
@@ -51,16 +47,13 @@ export function registerBg(program: Command): void {
 }
 
 /** Blue/green deployments whose source is the persist DB instance. */
-async function findDeployments(rds: RDSClient, dbInstanceId: string): Promise<BlueGreenDeployment[]> {
+async function findDeployments(dbInstanceId: string): Promise<BlueGreenDeployment[]> {
   const all = (await rds.send(new DescribeBlueGreenDeploymentsCommand({}))).BlueGreenDeployments ?? [];
   const mine = all.filter((d) => (d.Source ?? "").includes(dbInstanceId));
   return mine.length ? mine : all;
 }
 
-async function getDbCreds(
-  secrets: SecretsManagerClient,
-  secretArn: string,
-): Promise<{ username?: string; password?: string }> {
+async function getDbCreds(secretArn: string): Promise<{ username?: string; password?: string }> {
   const res = await secrets.send(new GetSecretValueCommand({ SecretId: secretArn }));
   if (!res.SecretString) return {};
   try {

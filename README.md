@@ -50,17 +50,17 @@ file, [`src/aws.ts`](./src/aws.ts), against your deployment:
 ## Usage
 
 ```bash
-npm install
+yarn install
 export AWS_REGION=us-east-1        # + credentials via env / SSO / role
-npm run ops -- alb describe-rules
-npm run ops -- bg green-db-conn --no-password
-npm run ops -- airflow migrate --stack airflow-3_2_1
+yarn ops alb describe-rules
+yarn ops bg green-db-conn --no-password
+yarn ops airflow migrate --stack airflow-3_2_1
 ```
 
 ## Build (for CI)
 
 ```bash
-npm run build          # → dist/ops.cjs (single self-contained file)
+yarn build          # → dist/ops.cjs (single self-contained file)
 node dist/ops.cjs airflow migrate --stack airflow-3_2_1 --yes
 ```
 
@@ -71,7 +71,7 @@ node dist/ops.cjs airflow migrate --stack airflow-3_2_1 --yes
 ## Development
 
 ```bash
-npm run typecheck
+yarn typecheck
 ```
 
 Source layout: `src/aws.ts` (clients, SSM-param resolution, one-off task runner),
