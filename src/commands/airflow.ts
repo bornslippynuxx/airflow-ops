@@ -2,8 +2,9 @@ import { Command } from "commander";
 import {
   session,
   runtimeStackName,
-  resolveTaskLaunchConfig,
+  runtimeConfig,
   runManualEcsTask,
+  AIRFLOW_CONTAINER,
   type AwsClients,
   type GlobalOpts,
 } from "../aws.js";
@@ -85,11 +86,12 @@ export function registerAirflow(program: Command): void {
     });
 }
 
-/** Resolve the runtime task config and run `airflow <argv>` as a one-off task. */
+/** Resolve the runtime config and run `airflow <argv>` as a one-off task. */
 async function runCli(aws: AwsClients, opts: GlobalOpts, argv: string[], wait: boolean): Promise<void> {
-  const cfg = await resolveTaskLaunchConfig(aws.ssm, runtimeStackName(opts));
+  const stack = runtimeStackName(opts);
+  const rc = await runtimeConfig(aws.ssm, stack);
   const pretty = `airflow ${argv.join(" ")}`;
-  say(`→ ${pretty}  (${cfg.stackName})`);
+  say(`→ ${pretty}  (${stack})`);
 
   if (opts.dryRun) {
     say(`✓ [dry-run] would run: ${pretty}`);
@@ -97,12 +99,12 @@ async function runCli(aws: AwsClients, opts: GlobalOpts, argv: string[], wait: b
   }
 
   const res = await runManualEcsTask(aws.ecs, {
-    cluster: cfg.cluster,
-    taskDefinition: cfg.taskDefinition,
-    container: cfg.container,
+    cluster: rc.clusterArn,
+    taskDefinition: rc.taskDefinitionArn,
+    container: AIRFLOW_CONTAINER,
     command: ["airflow", ...argv],
-    subnets: cfg.subnets,
-    securityGroups: cfg.securityGroups,
+    subnets: rc.privateSubnets,
+    securityGroups: rc.serviceSecurityGroups,
   }, { wait });
 
   say(wait ? `✓ ${pretty} completed (exit ${res.exitCode})` : `✓ ${pretty} started (${res.taskArn.split("/").pop()})`);

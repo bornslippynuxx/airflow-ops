@@ -6,7 +6,7 @@ import {
   type RDSClient,
 } from "@aws-sdk/client-rds";
 import { GetSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
-import { session, persistParam, pickStr, FIELDS } from "../aws.js";
+import { session, persistConfig } from "../aws.js";
 import { out, say, fail } from "../cli.js";
 
 /** `airflow-ops bg ...` — RDS Blue/Green Deployment operations on the persist DB. */
@@ -18,9 +18,8 @@ export function registerBg(program: Command): void {
     .description("Describe the RDS blue/green deployment(s) for the persist DB (read-only)")
     .action(async function (this: Command) {
       const { aws } = session(this);
-      const persist = await persistParam(aws.ssm);
-      const dbInstanceId = pickStr(persist, FIELDS.persist.dbInstanceId, "persist SSM param");
-      const deployments = await findDeployments(aws.rds, dbInstanceId);
+      const persist = await persistConfig(aws.ssm);
+      const deployments = await findDeployments(aws.rds, persist.dbInstanceIdentifier);
       out(deployments.map(summarize), (ds) =>
         ds.map((x) => `  ${x.name}  status=${x.status}  ${x.source} → ${x.target}`).join("\n") ||
         "  (no active blue/green deployment)",
@@ -35,9 +34,8 @@ export function registerBg(program: Command): void {
       const { aws } = session(this);
       const withPassword = (this.opts() as { password: boolean }).password;
 
-      const persist = await persistParam(aws.ssm);
-      const dbInstanceId = pickStr(persist, FIELDS.persist.dbInstanceId, "persist SSM param");
-      const dep = (await findDeployments(aws.rds, dbInstanceId))[0];
+      const persist = await persistConfig(aws.ssm);
+      const dep = (await findDeployments(aws.rds, persist.dbInstanceIdentifier))[0];
       if (!dep?.Target) fail("No active RDS blue/green deployment (or no green target yet).");
 
       const green = (await aws.rds.send(new DescribeDBInstancesCommand({ DBInstanceIdentifier: dep.Target })))
@@ -45,8 +43,7 @@ export function registerBg(program: Command): void {
       const endpoint = green?.Endpoint?.Address;
       if (!endpoint) fail("Green DB endpoint not available yet (still provisioning?).");
 
-      const secretArn = pickStr(persist, FIELDS.persist.dbSecretArn, "persist SSM param");
-      const creds = await getDbCreds(aws.secrets, secretArn);
+      const creds = await getDbCreds(aws.secrets, persist.dbSecretArn);
       const pw = withPassword ? (creds.password ?? "") : "***";
       const conn = `postgresql://${creds.username ?? "postgres"}:${pw}@${endpoint}:${green?.Endpoint?.Port ?? 5432}/${green?.DBName ?? "airflow"}`;
 

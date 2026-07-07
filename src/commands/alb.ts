@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { DescribeRulesCommand, type Rule } from "@aws-sdk/client-elastic-load-balancing-v2";
-import { session, persistParam, pickStr, FIELDS } from "../aws.js";
+import { session, persistConfig } from "../aws.js";
 import { out } from "../cli.js";
 
 /** `airflow-ops alb ...` — ELBv2 listener-rule operations (listener lives on persist). */
@@ -12,9 +12,8 @@ export function registerAlb(program: Command): void {
     .description("List the listener rules on the persist-stack ALB (read-only)")
     .action(async function (this: Command) {
       const { aws } = session(this);
-      const persist = await persistParam(aws.ssm);
-      const listenerArn = pickStr(persist, FIELDS.persist.listenerArn, "persist SSM param");
-      const { Rules = [] } = await aws.elbv2.send(new DescribeRulesCommand({ ListenerArn: listenerArn }));
+      const persist = await persistConfig(aws.ssm);
+      const { Rules = [] } = await aws.elbv2.send(new DescribeRulesCommand({ ListenerArn: persist.httpsListenerArn }));
 
       out(Rules.map(summarizeRule), (rules) =>
         rules

@@ -40,14 +40,12 @@ file, [`src/aws.ts`](./src/aws.ts), against your deployment:
 
 - `ENVIRONMENTS` — region per `--env`.
 - `SSM_PARAM` — the parameter paths.
-- `FIELDS` — the JSON field names the CLI reads out of each param. Check with:
+- `PersistConfig` / `RuntimeConfig` — the interfaces each param's JSON is parsed
+  into (field name = JSON key). Check the real keys with:
   ```
   aws ssm get-parameter --name /airflow/persist --query Parameter.Value --output text | jq keys
   ```
 - `AIRFLOW_CONTAINER` — the container name in the task def that runs the airflow CLI.
-
-A missing/renamed field fails fast with its name — fix it once, every command
-inherits it.
 
 ## Usage
 

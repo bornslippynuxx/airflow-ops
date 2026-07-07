@@ -83,32 +83,34 @@ export function session(cmd: Command): { opts: GlobalOpts; env: EnvConfig; aws: 
 }
 
 // ── config from SSM ───────────────────────────────────────────────────────────
-// Each stack publishes its outputs as a single JSON SSM parameter.
-// CONFIRM the parameter paths and the JSON field names below.
+// Each stack publishes its config as a single JSON SSM parameter. The interfaces
+// below ARE the JSON shape (field name = JSON key) — parse once, pass the struct
+// around. CONFIRM the paths and field names against your stacks.
 export const SSM_PARAM = {
   persist: "/airflow/persist",
   runtime: (stackName: string) => `/airflow/${stackName}`,
 };
 
-export const FIELDS = {
-  persist: {
-    dbInstanceId: "dbInstanceIdentifier",
-    dbSecretArn: "dbSecretArn",
-    listenerArn: "httpsListenerArn",
-  },
-  runtime: {
-    clusterArn: "clusterArn",
-    taskDefinitionArn: "taskDefinitionArn",
-    subnets: "privateSubnets", // JSON array or comma-separated string
-    securityGroups: "serviceSecurityGroups",
-  },
-} as const;
-
 // CONFIRM: the container name in the task definition that runs the airflow CLI.
 export const AIRFLOW_CONTAINER = "airflow";
 
-/** Read + parse a JSON SSM parameter into a plain object. */
-async function paramJson(ssm: SSMClient, name: string): Promise<Record<string, unknown>> {
+/** `/airflow/persist` */
+export interface PersistConfig {
+  dbInstanceIdentifier: string;
+  dbSecretArn: string;
+  httpsListenerArn: string;
+}
+
+/** `/airflow/<stack>` */
+export interface RuntimeConfig {
+  clusterArn: string;
+  taskDefinitionArn: string;
+  privateSubnets: string[];
+  serviceSecurityGroups: string[];
+}
+
+/** Read a JSON SSM parameter and parse it into `T`. */
+async function readConfig<T>(ssm: SSMClient, name: string): Promise<T> {
   let value: string | undefined;
   try {
     value = (await ssm.send(new GetParameterCommand({ Name: name, WithDecryption: true }))).Parameter?.Value;
@@ -117,57 +119,17 @@ async function paramJson(ssm: SSMClient, name: string): Promise<Record<string, u
   }
   if (!value) fail(`SSM parameter "${name}" is empty or missing.`);
   try {
-    return JSON.parse(value) as Record<string, unknown>;
+    return JSON.parse(value) as T;
   } catch {
     fail(`SSM parameter "${name}" is not valid JSON.`);
   }
 }
 
-/** The persist stack's config object (from /airflow/persist). */
-export function persistParam(ssm: SSMClient): Promise<Record<string, unknown>> {
-  return paramJson(ssm, SSM_PARAM.persist);
-}
+export const persistConfig = (ssm: SSMClient): Promise<PersistConfig> =>
+  readConfig<PersistConfig>(ssm, SSM_PARAM.persist);
 
-/** Pull a required string field out of a parsed param, with a clear error. */
-export function pickStr(obj: Record<string, unknown>, key: string, where: string): string {
-  const v = obj[key];
-  if (typeof v !== "string" || v === "") fail(`${where} is missing string field "${key}". Check FIELDS in src/aws.ts.`);
-  return v;
-}
-
-function pickList(obj: Record<string, unknown>, key: string, where: string): string[] {
-  const v = obj[key];
-  if (Array.isArray(v)) return v.map(String);
-  if (typeof v === "string") return v.split(",").map((s) => s.trim()).filter(Boolean);
-  fail(`${where} is missing list field "${key}". Check FIELDS in src/aws.ts.`);
-}
-
-export interface TaskLaunchConfig {
-  stackName: string;
-  cluster: string;
-  taskDefinition: string;
-  subnets: string[];
-  securityGroups: string[];
-  container: string;
-}
-
-/** Resolve everything needed to launch a one-off airflow-CLI task (one GetParameter). */
-export async function resolveTaskLaunchConfig(
-  ssm: SSMClient,
-  stackName: string,
-): Promise<TaskLaunchConfig> {
-  const p = await paramJson(ssm, SSM_PARAM.runtime(stackName));
-  const K = FIELDS.runtime;
-  const where = `runtime SSM param for ${stackName}`;
-  return {
-    stackName,
-    cluster: pickStr(p, K.clusterArn, where),
-    taskDefinition: pickStr(p, K.taskDefinitionArn, where),
-    subnets: pickList(p, K.subnets, where),
-    securityGroups: pickList(p, K.securityGroups, where),
-    container: AIRFLOW_CONTAINER,
-  };
-}
+export const runtimeConfig = (ssm: SSMClient, stackName: string): Promise<RuntimeConfig> =>
+  readConfig<RuntimeConfig>(ssm, SSM_PARAM.runtime(stackName));
 
 // ── one-off ECS task (how we run the airflow CLI) ─────────────────────────────
 export interface ManualEcsTaskParams {
