@@ -87,7 +87,7 @@ export function registerAirflow(program: Command): void {
 
 /** Resolve the runtime task config and run `airflow <argv>` as a one-off task. */
 async function runCli(aws: AwsClients, opts: GlobalOpts, argv: string[], wait: boolean): Promise<void> {
-  const cfg = await resolveTaskLaunchConfig(aws.cfn, runtimeStackName(opts));
+  const cfg = await resolveTaskLaunchConfig(aws.ssm, runtimeStackName(opts));
   const pretty = `airflow ${argv.join(" ")}`;
   say(`→ ${pretty}  (${cfg.stackName})`);
 

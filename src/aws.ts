@@ -1,5 +1,4 @@
 import type { Command } from "commander";
-import { CloudFormationClient, DescribeStacksCommand, type Stack } from "@aws-sdk/client-cloudformation";
 import {
   DescribeTasksCommand,
   ECSClient,
@@ -9,14 +8,15 @@ import {
 import { ElasticLoadBalancingV2Client } from "@aws-sdk/client-elastic-load-balancing-v2";
 import { RDSClient } from "@aws-sdk/client-rds";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { fail, say } from "./cli.js";
 
 // ── environments ──────────────────────────────────────────────────────────────
-// CONFIRM regions + persist stack name against the real deployment.
+// CONFIRM regions against the real deployment (creds are per-env / per-account).
 const ENVIRONMENTS = {
-  dev: { region: "us-east-1", persistStackName: "airflow-persist" },
-  staging: { region: "us-east-1", persistStackName: "airflow-persist" },
-  prod: { region: "us-east-1", persistStackName: "airflow-persist" },
+  dev: { region: "us-east-1" },
+  staging: { region: "us-east-1" },
+  prod: { region: "us-east-1" },
 } as const;
 
 export type EnvName = keyof typeof ENVIRONMENTS;
@@ -33,7 +33,6 @@ export interface GlobalOpts {
 export interface EnvConfig {
   name: EnvName;
   region: string;
-  persistStackName: string;
 }
 
 export function resolveEnv(name: string): EnvConfig {
@@ -58,7 +57,7 @@ export function runtimeStackName(opts: GlobalOpts): string {
 
 // ── clients + session ─────────────────────────────────────────────────────────
 export interface AwsClients {
-  cfn: CloudFormationClient;
+  ssm: SSMClient;
   ecs: ECSClient;
   elbv2: ElasticLoadBalancingV2Client;
   rds: RDSClient;
@@ -68,7 +67,7 @@ export interface AwsClients {
 export function makeClients(env: EnvConfig): AwsClients {
   const cfg = { region: env.region };
   return {
-    cfn: new CloudFormationClient(cfg),
+    ssm: new SSMClient(cfg),
     ecs: new ECSClient(cfg),
     elbv2: new ElasticLoadBalancingV2Client(cfg),
     rds: new RDSClient(cfg),
@@ -83,45 +82,64 @@ export function session(cmd: Command): { opts: GlobalOpts; env: EnvConfig; aws: 
   return { opts, env, aws: makeClients(env) };
 }
 
-// ── stack outputs ─────────────────────────────────────────────────────────────
-// CONFIRM these output keys against the deployed stacks.
-export const OUTPUT_KEYS = {
+// ── config from SSM ───────────────────────────────────────────────────────────
+// Each stack publishes its outputs as a single JSON SSM parameter.
+// CONFIRM the parameter paths and the JSON field names below.
+export const SSM_PARAM = {
+  persist: "/airflow/persist",
+  runtime: (stackName: string) => `/airflow/${stackName}`,
+};
+
+export const FIELDS = {
   persist: {
-    dbInstanceId: "DbInstanceIdentifier",
-    dbSecretArn: "DbSecretArn",
-    listenerArn: "HttpsListenerArn",
+    dbInstanceId: "dbInstanceIdentifier",
+    dbSecretArn: "dbSecretArn",
+    listenerArn: "httpsListenerArn",
   },
   runtime: {
-    clusterArn: "ClusterArn",
-    taskDefinitionArn: "TaskDefinitionArn",
-    privateSubnets: "PrivateSubnets", // comma-separated subnet ids
-    securityGroups: "ServiceSecurityGroups", // comma-separated sg ids
+    clusterArn: "clusterArn",
+    taskDefinitionArn: "taskDefinitionArn",
+    subnets: "privateSubnets", // JSON array or comma-separated string
+    securityGroups: "serviceSecurityGroups",
   },
 } as const;
 
 // CONFIRM: the container name in the task definition that runs the airflow CLI.
 export const AIRFLOW_CONTAINER = "airflow";
 
-async function fetchOutputs(cfn: CloudFormationClient, stackName: string): Promise<Map<string, string>> {
-  let stack: Stack | undefined;
+/** Read + parse a JSON SSM parameter into a plain object. */
+async function paramJson(ssm: SSMClient, name: string): Promise<Record<string, unknown>> {
+  let value: string | undefined;
   try {
-    stack = (await cfn.send(new DescribeStacksCommand({ StackName: stackName }))).Stacks?.[0];
+    value = (await ssm.send(new GetParameterCommand({ Name: name, WithDecryption: true }))).Parameter?.Value;
   } catch (e) {
-    fail(`Could not describe stack "${stackName}": ${(e as Error).message}`);
+    fail(`Could not read SSM parameter "${name}": ${(e as Error).message}`);
   }
-  if (!stack) fail(`Stack "${stackName}" not found.`);
-  const map = new Map<string, string>();
-  for (const o of stack.Outputs ?? []) {
-    if (o.OutputKey && o.OutputValue != null) map.set(o.OutputKey, o.OutputValue);
+  if (!value) fail(`SSM parameter "${name}" is empty or missing.`);
+  try {
+    return JSON.parse(value) as Record<string, unknown>;
+  } catch {
+    fail(`SSM parameter "${name}" is not valid JSON.`);
   }
-  return map;
 }
 
-/** Read one output value from a stack. */
-export async function stackOutput(cfn: CloudFormationClient, stackName: string, key: string): Promise<string> {
-  const v = (await fetchOutputs(cfn, stackName)).get(key);
-  if (v == null) fail(`Stack "${stackName}" is missing output "${key}". Check OUTPUT_KEYS in src/aws.ts.`);
+/** The persist stack's config object (from /airflow/persist). */
+export function persistParam(ssm: SSMClient): Promise<Record<string, unknown>> {
+  return paramJson(ssm, SSM_PARAM.persist);
+}
+
+/** Pull a required string field out of a parsed param, with a clear error. */
+export function pickStr(obj: Record<string, unknown>, key: string, where: string): string {
+  const v = obj[key];
+  if (typeof v !== "string" || v === "") fail(`${where} is missing string field "${key}". Check FIELDS in src/aws.ts.`);
   return v;
+}
+
+function pickList(obj: Record<string, unknown>, key: string, where: string): string[] {
+  const v = obj[key];
+  if (Array.isArray(v)) return v.map(String);
+  if (typeof v === "string") return v.split(",").map((s) => s.trim()).filter(Boolean);
+  fail(`${where} is missing list field "${key}". Check FIELDS in src/aws.ts.`);
 }
 
 export interface TaskLaunchConfig {
@@ -133,25 +151,20 @@ export interface TaskLaunchConfig {
   container: string;
 }
 
-/** Resolve everything needed to launch a one-off airflow-CLI task (one describe). */
+/** Resolve everything needed to launch a one-off airflow-CLI task (one GetParameter). */
 export async function resolveTaskLaunchConfig(
-  cfn: CloudFormationClient,
+  ssm: SSMClient,
   stackName: string,
 ): Promise<TaskLaunchConfig> {
-  const map = await fetchOutputs(cfn, stackName);
-  const K = OUTPUT_KEYS.runtime;
-  const need = (key: string): string => {
-    const v = map.get(key);
-    if (v == null) fail(`Stack "${stackName}" is missing output "${key}". Check OUTPUT_KEYS in src/aws.ts.`);
-    return v;
-  };
-  const list = (s: string) => s.split(",").map((x) => x.trim()).filter(Boolean);
+  const p = await paramJson(ssm, SSM_PARAM.runtime(stackName));
+  const K = FIELDS.runtime;
+  const where = `runtime SSM param for ${stackName}`;
   return {
     stackName,
-    cluster: need(K.clusterArn),
-    taskDefinition: need(K.taskDefinitionArn),
-    subnets: list(need(K.privateSubnets)),
-    securityGroups: list(need(K.securityGroups)),
+    cluster: pickStr(p, K.clusterArn, where),
+    taskDefinition: pickStr(p, K.taskDefinitionArn, where),
+    subnets: pickList(p, K.subnets, where),
+    securityGroups: pickList(p, K.securityGroups, where),
     container: AIRFLOW_CONTAINER,
   };
 }

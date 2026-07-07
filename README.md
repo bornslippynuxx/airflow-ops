@@ -3,7 +3,8 @@
 A small, typed CLI for operating an Apache Airflow 3 deployment running on AWS
 ECS Fargate + RDS. It replaces a pile of maintenance bash scripts (the kind you
 end up calling from CI jobs) with one binary whose commands resolve everything
-they need from **CloudFormation stack outputs** at runtime — no hardcoded ARNs.
+they need at runtime from **SSM parameters** (one JSON blob per stack) — no
+hardcoded ARNs.
 
 Built to run in CI (non-interactive): commands print status to stderr, machine
 output to stdout (`--json`), and destructive ops require `--yes`.
@@ -33,17 +34,19 @@ container command overridden — inheriting its DB connection config.
 
 ## Configure
 
-One file, [`src/aws.ts`](./src/aws.ts). Confirm against your deployment:
+Each stack publishes its outputs as a single JSON SSM parameter — persist at
+`/airflow/persist`, each runtime stack at `/airflow/<stack>`. Confirm these in one
+file, [`src/aws.ts`](./src/aws.ts), against your deployment:
 
-- `ENVIRONMENTS` — region + persist stack name per `--env`.
-- `OUTPUT_KEYS` — the CloudFormation output keys the CLI reads. Check with:
+- `ENVIRONMENTS` — region per `--env`.
+- `SSM_PARAM` — the parameter paths.
+- `FIELDS` — the JSON field names the CLI reads out of each param. Check with:
   ```
-  aws cloudformation describe-stacks --stack-name airflow-persist \
-    --query 'Stacks[0].Outputs[].OutputKey'
+  aws ssm get-parameter --name /airflow/persist --query Parameter.Value --output text | jq keys
   ```
 - `AIRFLOW_CONTAINER` — the container name in the task def that runs the airflow CLI.
 
-A missing/renamed output fails fast with the key name — fix it once, every command
+A missing/renamed field fails fast with its name — fix it once, every command
 inherits it.
 
 ## Usage
@@ -76,7 +79,7 @@ node dist/ops.cjs alb describe-rules --env prod --json
 npm run typecheck
 ```
 
-Source layout: `src/aws.ts` (env, clients, stack-output resolution, one-off task
+Source layout: `src/aws.ts` (env, clients, SSM-param resolution, one-off task
 runner), `src/cli.ts` (output, `--yes` guard, error→exit-code), `src/commands/*`
 (thin command handlers), `src/index.ts` (wiring).
 
