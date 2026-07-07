@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+.env
+.env.*
+
+# kept local (internal design/ops docs)
+PLAN.md
+WIRING.md
