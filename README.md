@@ -7,8 +7,8 @@ they need at runtime from **SSM parameters** (one JSON blob per stack) — no
 hardcoded ARNs.
 
 Built to run in GitLab CI (non-interactive): status goes to stderr, results to
-stdout, and destructive ops require `--yes`. Region + credentials come from the
-ambient AWS environment (`AWS_REGION` + the role the job assumes).
+stdout. Region + credentials come from the ambient AWS environment (`AWS_REGION` +
+the role the job assumes).
 
 ## Topology it assumes
 
@@ -20,18 +20,21 @@ ambient AWS environment (`AWS_REGION` + the role the job assumes).
 ## Commands
 
 ```
-airflow  migrate                 # airflow db migrate      (one-off ECS task)
-airflow  metadata-clean --before # airflow db clean        (destructive)
-airflow  create-task-pool        # airflow pools set
-airflow  create-api-user         # airflow users create
-alb      describe-rules          # list ALB listener rules
-bg       describe                # RDS blue/green deployment status
-bg       green-db-conn           # green (target) DB connection string
+airflow  exec -- <cmd>   # run any airflow CLI command (db migrate, pools set, users create, …)
+airflow  metadata-clean  # airflow db clean, with a retention policy (see below)
+alb      describe-rules  # list ALB listener rules
+bg       describe        # RDS blue/green deployment status
+bg       green-db-conn   # green (target) DB connection string
 ```
 
-The `airflow *` commands can't shell into a running service, so they launch a
-one-off Fargate task from the runtime stack's existing task definition with the
-container command overridden — inheriting its DB connection config.
+The `airflow` commands can't shell into a running service, so they launch a one-off
+Fargate task from the runtime stack's existing task definition with the container
+command overridden — inheriting its DB connection config. `exec` is a straight
+passthrough; `metadata-clean` wraps `airflow db clean` with policy:
+
+- `--retention-days <N>` (default 60) → deletes metadata before _N days ago_.
+- Refuses `N < 30` unless `--dry-run` (protects recent metadata).
+- `--mode clean_all` (default) or `exclude_dag_version` (keeps `dag_version`/`dag`).
 
 ## Configure
 
@@ -50,23 +53,23 @@ your deployment:
 ## Usage
 
 ```bash
-yarn install
-export AWS_REGION=us-east-1        # + credentials via env / SSO / role
-yarn ops alb describe-rules
-yarn ops bg green-db-conn --no-password
-yarn ops airflow migrate --stack airflow-3_2_1
+yarn install && yarn build         # tsc → dist/
+export AWS_REGION=us-east-1         # + credentials via env / SSO / role
+node dist/index.js alb describe-rules
+node dist/index.js bg green-db-conn --no-password
+node dist/index.js airflow exec --stack airflow-3_2_1 -- db migrate
+node dist/index.js airflow metadata-clean --stack airflow-3_2_1 --retention-days 60
 ```
+
+Run the compiled `dist/` — the `airflow exec … -- <cmd>` passthrough relies on the
+`--` separator, which `yarn`/`npm` scripts swallow.
 
 ## Build (for CI)
 
 ```bash
 yarn build          # tsc → dist/ (compiled JS)
-node dist/index.js airflow migrate --stack airflow-3_2_1 --yes
+node dist/index.js airflow exec --stack airflow-3_2_1 -- db migrate
 ```
-
-## Global flags
-
-`--stack <name>` · `--yes`
 
 ## Development
 

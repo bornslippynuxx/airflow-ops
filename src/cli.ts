@@ -22,9 +22,7 @@ export class Cli {
     this.program
       .name("airflow-ops")
       .description("Ops CLI for the Airflow ECS/Fargate + RDS deployment.")
-      .version("0.1.0")
-      .option("--stack <name>", "runtime stack name, e.g. airflow-3_2_1")
-      .option("-y, --yes", "confirm destructive ops (required in CI)", false);
+      .version("0.1.0");
 
     new AirflowCommands(config, runner).register(this.program);
     new AlbCommands(config, aws.elbv2).register(this.program);

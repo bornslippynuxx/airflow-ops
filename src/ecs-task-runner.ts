@@ -1,9 +1,4 @@
-import {
-  DescribeTasksCommand,
-  ECSClient,
-  RunTaskCommand,
-  waitUntilTasksStopped,
-} from "@aws-sdk/client-ecs";
+import { DescribeTasksCommand, ECSClient, RunTaskCommand, waitUntilTasksStopped } from "@aws-sdk/client-ecs";
 import { Log } from "./log.js";
 
 /** A request to run one Airflow CLI command as a one-off Fargate task. */
