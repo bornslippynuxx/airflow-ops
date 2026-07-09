@@ -165,11 +165,15 @@ node dist/index.js alb describe-rules
 Region + credentials come from the ambient AWS environment (`AWS_REGION` + the
 OIDC/assumed role) — the CI job for a given account is already scoped to it.
 
-### GitLab jobs (build once, thin wrappers consume the artifact)
+### Every command → its GitLab job
 
 One build job compiles `dist/`; the ops jobs `needs: [build]` and just run
 `node dist/index.js`. The AWS SDK is **not** bundled, so the runtime also needs
 `node_modules` — artifact it alongside `dist/` (or cache + reinstall per job).
+
+The five commands map one-to-one onto jobs. Read-only jobs (`alb`, `bg`) are safe
+to run on any pipeline; the mutating `airflow` jobs are gated `when: manual` so a
+human clicks them.
 
 ```yaml
 build:
@@ -187,21 +191,48 @@ build:
   needs: [build]
   # AWS creds via OIDC (id_tokens + sts:AssumeRoleWithWebIdentity); sets AWS_REGION
 
-alb_describe_rules:
+# ── read-only (zero blast radius) ────────────────────────────────────────────
+alb_describe_rules: # alb describe-rules
   extends: .ops
   script: ["node dist/index.js alb describe-rules"]
 
-db_migrate: # job name unchanged; airflow op goes through `exec`
+bg_describe: # bg describe
   extends: .ops
-  script: ["node dist/index.js airflow exec --stack $STACK -- db migrate"]
+  script: ["node dist/index.js bg describe"]
 
-db_metadata_clean:
+bg_green_db_conn: # bg green-db-conn (password masked; drop --no-password to reveal)
   extends: .ops
-  script: ["node dist/index.js airflow metadata-clean --stack $STACK --retention-days $DAYS --mode $MODE"]
+  script: ["node dist/index.js bg green-db-conn --no-password"]
+
+# ── mutating: launch a one-off ECS task (manual gate) ────────────────────────
+airflow_exec: # airflow exec — arbitrary airflow CLI, e.g. db migrate
+  extends: .ops
+  when: manual
+  variables: { STACK: airflow-3_2_1, AIRFLOW_CMD: "db migrate" }
+  script: ["node dist/index.js airflow exec --stack $STACK -- $AIRFLOW_CMD"]
+
+airflow_metadata_clean: # airflow metadata-clean — purge old metadata
+  extends: .ops
+  when: manual
+  variables: { STACK: airflow-3_2_1, DAYS: "60", MODE: clean_all }
+  script:
+    - node dist/index.js airflow metadata-clean --stack $STACK --retention-days $DAYS --mode $MODE
 ```
 
-`metadata-clean` guards deletes with a 30-day retention floor + `--dry-run` (not a
-`--yes` gate). Any failure exits non-zero, so the GitLab job goes red.
+Notes per command:
+
+- **`airflow exec`** needs the `--` separator so the airflow subcommand isn't parsed
+  as CLI options. Passing it through a `$AIRFLOW_CMD` variable (unquoted) lets one job
+  run any airflow command; for a fixed op just inline it: `... -- db migrate`.
+- **`airflow metadata-clean`** guards deletes with a 30-day retention floor +
+  `--dry-run` (not a `--yes` gate). Add `--dry-run` to the script to preview, and
+  `--mode exclude_dag_version` to keep DAG-version history.
+- Both `airflow` jobs wait for the ECS task and surface its container exit code, so a
+  failed migration turns the job red. Add `--no-wait` to fire-and-forget.
+- **`bg green-db-conn`** prints a connection string; keep `--no-password` in CI so the
+  secret never lands in job logs.
+
+Any command that fails exits non-zero, so the GitLab job goes red.
 
 ---
 
