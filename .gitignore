@@ -5,6 +5,4 @@ dist/
 .env
 .env.*
 
-# kept local (internal design/ops docs)
-PLAN.md
-WIRING.md
+
