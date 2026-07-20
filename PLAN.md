@@ -98,6 +98,81 @@ across, then switch. Run these steps in order:
 If any step fails, undo the steps already done: start the old services again, remove
 the maintenance page, point the load balancer back, and restore the snapshot.
 
+## Deploying infrastructure changes (no version upgrade) — graceful worker drain
+
+The runbook above is for a **version** change. Most deploys aren't: they change only the
+**infrastructure** on the _same_ Airflow version — task sizing (CPU/memory), env vars, a
+same-version image patch, autoscaling. Those deploy **in place**: you re-deploy the same
+version-named stack and let ECS roll the tasks. There is **no** new stack, no DB snapshot, no
+`db migrate` (the schema doesn't change), no ALB cutover, and no maintenance page.
+
+The one real risk is the **worker** service. When ECS replaces a running worker task it sends
+it a SIGTERM; if the worker isn't set up to drain, that SIGTERM (eventually a SIGKILL) **kills
+whatever DAG task instances were mid-run**. The settings below make the old worker _drain_ —
+stop taking new work, finish what it's running — before ECS kills it.
+
+This works here because **our tasks run under ~2 minutes**, which fits inside Fargate's hard
+**120-second `stopTimeout` cap**. If that stops being true, item 6 (retry/adoption) stops being
+a safety net and becomes load-bearing.
+
+### The deploy
+
+1. Confirm it's a same-version change: the Airflow version / image tag and the stack name are
+   unchanged. If the version changes, use the upgrade runbook above instead.
+2. `cdk deploy` the same version-named runtime stack in place (the deploy job, not this tool).
+   ECS registers a new task-def revision and rolls each service.
+3. That's it — no `db migrate`, no snapshot, no ALB cutover, no maintenance page.
+4. **Rollback:** the ECS deployment circuit breaker auto-reverts to the previous task-def
+   revision (or re-deploy the previous CDK revision). No DB restore — the schema was untouched.
+
+### The config that makes workers drain (set once, in the CDK stack / Airflow config)
+
+These belong in the CDK task/service definitions and Airflow config, not in this tool. Verify
+them once (see below); after that every in-place deploy drains cleanly.
+
+1. **SIGTERM must reach Celery — the #1 cause of killed tasks.** ECS sends SIGTERM to the
+   container's PID 1. Celery only warm-shuts-down if it actually receives it. Make the worker
+   entrypoint `exec` the Celery worker (so it _is_ PID 1), **or** set the container's
+   `linuxParameters.initProcessEnabled: true` (tini) to forward signals. A shell wrapper that
+   swallows SIGTERM means no drain and every deploy kills running tasks. If you check only one
+   thing, check this.
+2. **Worker `stopTimeout: 120`** (the Fargate maximum). ECS waits this long after SIGTERM
+   before SIGKILL — long enough for a sub-2-minute task to finish. Keep the Airflow task
+   `execution_timeout` comfortably under 120s (≤ ~100s). Any task that runs past ~120s can
+   still be killed and must fall back on retries (item 6).
+3. **Keep Celery's default warm shutdown.** One SIGTERM = warm shutdown (stop consuming, finish
+   active tasks, exit). ECS sends exactly one, then waits `stopTimeout`. Don't add anything that
+   sends a _second_ SIGTERM — that forces a cold shutdown, which kills running tasks.
+4. **`AIRFLOW__CELERY__WORKER_PREFETCH_MULTIPLIER = 1`.** With higher prefetch a worker reserves
+   messages it hasn't started yet; on drain those sit stuck or get lost. Multiplier 1 means it
+   only holds what it's actively running.
+5. **ECS deployment config on every service:** `minimumHealthyPercent: 100`,
+   `maximumPercent: 200`, and the **deployment circuit breaker with rollback** enabled. ECS then
+   starts and health-checks the new tasks _before_ draining the old ones, so old workers get
+   their full SIGTERM + `stopTimeout` drain window and the webserver/API stays reachable.
+6. **Retry / adoption safety net** (for a task that outlives the window, or a worker that dies
+   outright): give tasks `retries >= 1`; set the broker **visibility timeout above the max task
+   runtime** (SQS visibility timeout / Redis `visibility_timeout`) with `task_acks_late` so an
+   interrupted, unacked message is redelivered instead of lost; and confirm the scheduler
+   adopts/re-queues orphaned `running` task instances so none are stranded.
+7. **Worker container health check** (e.g. `celery inspect ping`), so ECS counts a new worker
+   as healthy only once it's actually consuming — otherwise, with `minimumHealthyPercent: 100`,
+   ECS could drain an old worker before its replacement is ready.
+8. **ALB target-group `deregistration_delay` (~30s)** on the webserver/API, so in-flight HTTP
+   requests to old tasks finish during the roll (finishes the zero-downtime story for the UI).
+
+### Verify it once, on dev
+
+1. Kick off a ~90-second dummy DAG task on a dev worker.
+2. While it's running, `cdk deploy` in place (or otherwise force a new task-def revision) so ECS
+   rolls the worker service.
+3. In the worker logs, confirm SIGTERM triggers a **warm shutdown** and the task **runs to
+   completion** (not SIGKILLed); confirm the task instance ends `success` in the UI.
+4. Confirm the webserver/API stayed reachable and the deployment reached steady state (no
+   circuit-breaker rollback).
+5. Optional negative check: temporarily drop the worker `stopTimeout` to ~30s and repeat — the
+   task should now be killed at ~30s, proving `stopTimeout` is the control that matters.
+
 ## Notes
 
 - User creation, pool creation, etc. go through `airflow exec` — e.g.

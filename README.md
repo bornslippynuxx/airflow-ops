@@ -17,6 +17,13 @@ the role the job assumes).
   task def), e.g. `airflow-3_1_1`. The stack name is the version; commands that
   target it take `--stack airflow-3_2_1`.
 
+**Deploying:** a **version** change stands up a new stack beside the old — see
+["Upgrading to a new Airflow version"](./PLAN.md#upgrading-to-a-new-airflow-version).
+An **infra-only** change (same version — sizing, env, a same-version image patch)
+deploys **in place**; the CDK stack + Airflow config must drain Celery workers so
+in-flight tasks aren't killed — see
+["Deploying infrastructure changes (no version upgrade)"](./PLAN.md#deploying-infrastructure-changes-no-version-upgrade--graceful-worker-drain).
+
 ## Commands
 
 ```
