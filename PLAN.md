@@ -163,15 +163,25 @@ them once (see below); after that every in-place deploy drains cleanly.
 
 ### Verify it once, on dev
 
-1. Kick off a ~90-second dummy DAG task on a dev worker.
-2. While it's running, `cdk deploy` in place (or otherwise force a new task-def revision) so ECS
-   rolls the worker service.
-3. In the worker logs, confirm SIGTERM triggers a **warm shutdown** and the task **runs to
+1. Kick off a ~90-second dummy DAG task on a dev worker — use
+   [`examples/dags/test_worker_drain.py`](./examples/dags/test_worker_drain.py) (trigger
+   `test_worker_drain`; override `{"sleep_seconds": 300}` for the negative check in step 5).
+2. Also **unpause** [`examples/dags/test_worker_drain_probe.py`](./examples/dags/test_worker_drain_probe.py)
+   (`test_worker_drain_probe`) — it fires a tiny task every 15s that logs which worker it landed
+   on, so you can confirm the draining worker takes **no new work**. **Re-pause it after the
+   test** (an every-15s DAG floods the metadata DB).
+3. While the long task is running, `cdk deploy` in place (or otherwise force a new task-def
+   revision) so ECS rolls the worker service.
+4. In the worker logs, confirm SIGTERM triggers a **warm shutdown** and the long task **runs to
    completion** (not SIGKILLed); confirm the task instance ends `success` in the UI.
-4. Confirm the webserver/API stayed reachable and the deployment reached steady state (no
+5. In the probe logs, confirm the draining worker's PID appears **before** its SIGTERM and
+   **stops** appearing after — new probes land only on the other workers, which keep running
+   throughout (proves it stopped consuming new messages).
+6. Confirm the webserver/API stayed reachable and the deployment reached steady state (no
    circuit-breaker rollback).
-5. Optional negative check: temporarily drop the worker `stopTimeout` to ~30s and repeat — the
-   task should now be killed at ~30s, proving `stopTimeout` is the control that matters.
+7. Optional negative check: trigger the long task with `{"sleep_seconds": 300}` (or temporarily
+   drop the worker `stopTimeout` to ~30s) and repeat — the task should now be killed mid-run,
+   proving `stopTimeout` is the control that matters for anything past the ~120s window.
 
 ## Notes
 
