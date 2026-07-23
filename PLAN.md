@@ -176,7 +176,10 @@ them once (see below); after that every in-place deploy drains cleanly.
    completion** (not SIGKILLed); confirm the task instance ends `success` in the UI.
 5. In the probe logs, confirm the draining worker's PID appears **before** its SIGTERM and
    **stops** appearing after — new probes land only on the other workers, which keep running
-   throughout (proves it stopped consuming new messages).
+   throughout (proves it stopped consuming new messages). With a **single worker**, there are
+   no "other workers": post-SIGTERM probes instead **queue** and then drain onto the
+   **replacement** worker, never running on the old one again — and no probe should be
+   SIGTERM'd mid-run (that would be a cold shutdown).
 6. Confirm the webserver/API stayed reachable and the deployment reached steady state (no
    circuit-breaker rollback).
 7. Optional negative check: trigger the long task with `{"sleep_seconds": 300}` (or temporarily

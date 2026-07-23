@@ -5,19 +5,32 @@ NO new work.
 the task it's already running*. This DAG tests the other half: once a worker
 starts draining, it must *stop pulling new tasks off the queue*.
 
-It fires a tiny task (`which_worker`) every 15 seconds; each run logs the ECS
-Fargate **task id** of the worker it landed on. Run it alongside
-`test_worker_drain` during a deploy:
+It fires a `which_worker` task every 15 seconds; each run **occupies the worker for
+~12s** (configurable via the `probe_seconds` param), logging a heartbeat every 5s
+with the ECS Fargate **task id** of the worker it landed on. Occupying the worker —
+rather than returning in under a second — is what makes this a real test: it keeps
+the worker continuously busy so there is always work on offer, and it guarantees a
+probe is *actively running* when SIGTERM arrives so you can watch what happens to it.
 
-  - Note the worker (task id) that `test_worker_drain.long_running_sleep` is on,
-    and the moment it logs receiving (or gracefully not receiving) SIGTERM.
-  - In this probe's logs, that task id should keep appearing *before* the SIGTERM
-    and then STOP appearing *after* it — new probes land only on the other
-    (non-draining) workers, which keep running throughout. That's the proof the
-    draining worker consumes no new messages.
-  - If the draining worker's task id keeps showing up on probes fired after its
-    SIGTERM, it is still consuming — the warm shutdown isn't taking effect (see
-    PLAN.md items 1 and 3).
+Run it alongside `test_worker_drain` during a deploy.
+
+**Single-worker reading** (the setup this is tuned for):
+
+  - Before the deploy, every probe runs on worker **A** (`ecs-task:A`).
+  - The deploy makes ECS start a replacement worker **B** and SIGTERM **A** (warm
+    shutdown). A *finishes the probe it is mid-run on*, then stops consuming.
+  - Probes fired after that have nowhere to run on A — they **queue** until B is
+    healthy, then run on **B** (`ecs-task:B`). You'll see a gap on A, a backlog, and
+    then the backlog draining onto B.
+  - PROOF of "no new work": after A's SIGTERM, **no probe ever runs on A again** —
+    the queue drains onto B instead.
+  - FAILURE signal: a probe that logs `⚠️ probe SIGTERM'd mid-run` means A grabbed a
+    *new* task and was killed running it — a cold shutdown, not a drain (see PLAN.md
+    items 1 and 3).
+
+**With N workers**, the same evidence reads as: the draining worker's task id keeps
+appearing *before* its SIGTERM and STOPS appearing *after*, while the other
+(non-draining) workers keep running throughout.
 
 The worker is identified by its ECS Fargate task id (read from the
 `ECS_CONTAINER_METADATA_URI_V4` endpoint), not the PID — on Fargate the worker is
@@ -34,17 +47,23 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import socket
+import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
 # Airflow 3 Task SDK, with a fallback for older layouts.
 try:
-    from airflow.sdk import dag, task
+    from airflow.sdk import dag, get_current_context, task
 except ImportError:  # pragma: no cover - Airflow < 3
     from airflow.decorators import dag, task
+    from airflow.operators.python import get_current_context
 
 log = logging.getLogger("airflow.task")
+
+DEFAULT_PROBE_SECONDS = 12
+HEARTBEAT_SECONDS = 5
 
 
 def worker_id() -> str:
@@ -76,21 +95,78 @@ def worker_id() -> str:
     max_active_runs=16,  # let runs overlap so the 15s cadence isn't throttled to 1
     dagrun_timeout=timedelta(minutes=5),
     is_paused_upon_creation=True,  # OFF by default — see the docstring warning
+    params={"probe_seconds": DEFAULT_PROBE_SECONDS},
     tags=["ops", "smoke", "drain-test"],
     doc_md=__doc__,
 )
 def test_worker_drain_probe():
-    @task(retries=0, execution_timeout=timedelta(seconds=30))
-    def which_worker() -> dict[str, str]:
+    @task(retries=0, execution_timeout=timedelta(seconds=60))
+    def which_worker() -> dict[str, object]:
+        ctx = get_current_context()
+        try:
+            probe_seconds = int(ctx["params"]["probe_seconds"])
+        except (KeyError, TypeError, ValueError):
+            probe_seconds = DEFAULT_PROBE_SECONDS
+
         worker = worker_id()
-        now = datetime.now(timezone.utc)
+        start_wall = datetime.now(timezone.utc)
+        start = time.monotonic()
+
+        # Catch a COLD shutdown in the act: if this probe is SIGTERM'd mid-run, the
+        # worker grabbed a *new* task while draining and is being killed running it —
+        # the exact failure this probe exists to detect. Log it loudly, then chain to
+        # Airflow's own handler so the task still terminates as Airflow expects.
+        original = signal.getsignal(signal.SIGTERM)
+
+        def on_sigterm(signum, frame):
+            log.warning(
+                "⚠️ probe SIGTERM'd mid-run at t+%.0fs on worker %s — worker did NOT "
+                "drain, it consumed a NEW task and is being killed (cold shutdown). "
+                "Check PLAN.md items 1 and 3.",
+                time.monotonic() - start,
+                worker,
+            )
+            if callable(original):
+                original(signum, frame)
+
+        signal.signal(signal.SIGTERM, on_sigterm)
+
         log.info(
-            "🛰️ probe ran on worker %s at %s — a draining worker should STOP appearing "
-            "here once it has received SIGTERM",
+            "🛰️ probe start: occupying worker %s for %ds at %s — a draining worker "
+            "should STOP appearing here once it has received SIGTERM",
             worker,
-            now.isoformat(),
+            probe_seconds,
+            start_wall.isoformat(),
         )
-        return {"worker": worker, "ran_at": now.isoformat()}
+
+        beat = 0
+        deadline = start + probe_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(HEARTBEAT_SECONDS, remaining))
+            beat += 1
+            log.info(
+                "💓 probe heartbeat %d — t+%.0fs / %ds on worker %s",
+                beat,
+                time.monotonic() - start,
+                probe_seconds,
+                worker,
+            )
+
+        end_wall = datetime.now(timezone.utc)
+        log.info(
+            "✅ probe completed full %ds on worker %s — it consumed and ran this task",
+            probe_seconds,
+            worker,
+        )
+        return {
+            "worker": worker,
+            "probe_seconds": probe_seconds,
+            "started_at": start_wall.isoformat(),
+            "finished_at": end_wall.isoformat(),
+        }
 
     which_worker()
 
